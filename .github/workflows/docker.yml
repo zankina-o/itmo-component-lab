@@ -1,0 +1,68 @@
+name: docker
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build -t student-fs \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" .
+
+      - name: Self-test (contract ISU-FILES-DIRECTORIES-SIZE)
+        run: |
+          run() {
+            docker run --rm --network none \
+              --mount type=bind,source="$1",target=/data,readonly \
+              student-fs
+          }
+          check() {
+            out=$(run "$1")
+            echo "$1 -> $out"
+            echo "$out" | grep -Eq '^[0-9]{6}-[0-9]+-[0-9]+-[0-9]+\s*$' || { echo "bad format"; exit 1; }
+            [ "$(echo "$out" | wc -l)" -eq 1 ] || { echo "more than one line"; exit 1; }
+            [ "${out#*-}" = "$2" ] || { echo "expected *-$2"; exit 1; }
+          }
+
+          T="$RUNNER_TEMP/t"
+          mkdir -p "$T/ex/docs/old" "$T/ex/empty"
+          head -c 100 /dev/zero > "$T/ex/a.txt"
+          head -c 500 /dev/zero > "$T/ex/b.txt"
+          head -c 200 /dev/zero > "$T/ex/docs/c.txt"
+          head -c 50 /dev/zero > "$T/ex/docs/old/d.txt"
+          ln -s a.txt "$T/ex/link-to-file"
+          ln -s docs "$T/ex/link-to-dir"
+          check "$T/ex" "4-3-850"
+
+          mkdir -p "$T/empty"
+          check "$T/empty" "0-0-0"
+
+          mkdir -p "$T/files"
+          printf 'abc' > "$T/files/a b c.txt"
+          : > "$T/files/zero.bin"
+          check "$T/files" "2-0-3"
+
+          mkdir -p "$T/dirs/x" "$T/dirs/y z/w"
+          check "$T/dirs" "0-3-0"
+
+          echo "ISU=$(run "$T/empty" | cut -d- -f1)" >> "$GITHUB_ENV"
+
+      - name: Publish to GitHub Container Registry
+        run: |
+          IMAGE="ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/itmo-component-lab:$ISU"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag student-fs "$IMAGE"
+          docker push "$IMAGE"
+          docker logout ghcr.io
+          echo "### Образ для сдачи: \`$IMAGE\`" >> "$GITHUB_STEP_SUMMARY"
